@@ -4,6 +4,12 @@
 
 ### Bridging Reasoning and Action Prediction for Generalizable Autonomous Driving
 
+</div>
+
+> **Note for reviewers.** This repository is the anonymous code release for our submission. The current implementation relies entirely on the upstream Alpamayo codebase (forked from [NVlabs/alpamayo](https://github.com/NVlabs/alpamayo)) and contains only the fork scaffolding at this time. The full source code for our speculative-decoding additions (FlatRoPE draft, AARL post-training, EAGLE-3 / DFlash drafts, training and evaluation scripts) will be released after publication.
+
+<div align="center">
+
 [![HuggingFace](https://img.shields.io/badge/%F0%9F%A4%97%20Model-Alpamayo--R1--10B-blue)](https://huggingface.co/nvidia/Alpamayo-R1-10B)
 [![arXiv](https://img.shields.io/badge/arXiv-2511.00088-b31b1b.svg)](https://arxiv.org/abs/2511.00088)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](./LICENSE)
