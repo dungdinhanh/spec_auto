@@ -214,3 +214,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-local: heavy binaries should not pollute git status / shouldn't be committed
+_archive_binaries/
+claude_report/
+figure_scenes/
+claude_mod/
+.claude/
+*.pt
+*.pdf
+*.gif
+*.log
