@@ -1,3 +1,4 @@
+import os
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -22,7 +23,7 @@ import collections.abc
 
 MIN_PIXELS = 163840
 MAX_PIXELS = 196608
-BASE_PROCESSOR_NAME = "Qwen/Qwen3-VL-2B-Instruct"
+BASE_PROCESSOR_NAME = os.environ.get("PROCESSOR_PATH", "Qwen/Qwen3-VL-2B-Instruct")
 
 
 def create_message(frames: torch.Tensor):
