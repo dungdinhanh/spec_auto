@@ -6,7 +6,7 @@
 
 </div>
 
-> **Note for reviewers.** This repository is the anonymous code release for our submission. The current implementation relies entirely on the upstream Alpamayo codebase (forked from [NVlabs/alpamayo](https://github.com/NVlabs/alpamayo)) and contains only the fork scaffolding at this time. The full source code for our speculative-decoding additions (FlatRoPE draft, AARL post-training, EAGLE-3 / DFlash drafts, training and evaluation scripts) will be released after publication.
+> **Note for reviewers.** This repository is the anonymous code release for our speculative-decoding work on Alpamayo-R1. It forks [NVlabs/alpamayo](https://github.com/NVlabs/alpamayo) and adds DFlash + EAGLE-3 draft models, AARL post-training, target-output generation, training/eval pipelines, and launch scripts for multi-cluster training. See **[Speculative Decoding for Alpamayo-R1](#speculative-decoding-for-alpamayo-r1)** below.
 
 <div align="center">
 
@@ -119,6 +119,204 @@ This release includes the core model, SFT scripts, and the RL post-training pipe
 
 Please refer to the linked guides for compute requirements, step-by-step
 instructions, and fine-tuning FAQ.
+
+## Speculative Decoding for Alpamayo-R1
+
+This fork adds a speculative-decoding pipeline that accelerates Alpamayo-R1's
+chain-of-causation (CoC) reasoning. The autoregressive VLM stream produces
+~15–20 reasoning tokens per scene before the diffusion head emits a trajectory,
+and that AR phase is what speculative decoding speeds up.
+
+### What's in this fork
+
+| Component | Location | What it does |
+|---|---|---|
+| **DFlash draft** (block-diffusion) | `src/dflash/`, `src/alpamayo_r1/models/dflash_draft.py` (1D RoPE), `dflash_draft_mrope.py` (3D M-RoPE) | Block-diffusion draft model: predicts `block_size − 1` tokens in parallel by denoising a masked block conditioned on target hidden states from multiple layers. |
+| **EAGLE-3 draft** (chain decoding) | `src/alpamayo_r1/models/eagle3_draft.py`, `eagle3_infer.py` | Paper-faithful EAGLE-3 chain draft (single decoder layer + LM head + fc projection over 3 target layers), with 1D and 3D rotary variants. |
+| **AR draft baseline** | `src/alpamayo_r1/models/autoregressive_draft.py` | Small autoregressive draft for baseline comparison. |
+| **DFlash SFT trainer** | `scripts/python/training/train_dflash_distillation_v7.py` | Block-diffusion supervised fine-tuning with weighted CE + optional KL distillation against the target's full token distribution. |
+| **DFlash AARL trainer** | `scripts/python/training/train_dflash_rl_action_v5.py` | Multi-block contamination AARL: K=32 rollouts per rejection block, GRPO advantage, KL anchor against a frozen ref draft, action-MSE + token-match reward. |
+| **EAGLE-3 SFT trainer** | `scripts/python/training/train_eagle3.py` | EAGLE-3 chain SFT (rollout-length 7, target_layer_ids [1, 17, 32]). |
+| **EAGLE-3 AARL trainer** | `scripts/python/training/train_eagle3_rl_action_v2.py` | Multi-block contamination port of the DFlash AARL to chain decoding. |
+| **Target-output generation** | `scripts/python/training/generate_target_outputs.py` | Runs Alpamayo's greedy CoC + caches `prompt_input_ids`, optional `output_logits`, `pixel_values`, `image_grid_thw` per clip — the format consumed by the SFT and AARL trainers. |
+| **End-to-end spec-decode eval** | `scripts/python/evaluation/benchmark_spec_decoding.py`, plus per-arch e2e scripts | Measures L (avg accepted tokens per iter), c-ratio (draft cost / verify cost), and wall-clock speedup vs AR baseline. |
+
+Launch scripts under `scripts/bash/` are concrete examples used during our
+research; they bake in cluster-specific paths (sharon = bare-metal H100 NVL,
+katana = UNSW HPC with H200 reservation + L40S) and serve as templates for
+adapting to your own environment.
+
+### Environment setup
+
+Follow the upstream Alpamayo install ([Installation](#installation)), then make
+the additional draft / DFlash code importable:
+
+```bash
+# 1. Upstream Alpamayo env (uv venv ar1_venv + uv sync --active per upstream)
+source ar1_venv/bin/activate
+
+# 2. Put this fork's src/ and the DFlash submodule on PYTHONPATH
+export PYTHONPATH="$PWD/src:$PWD/src/dflash:${PYTHONPATH:-}"
+
+# 3. Model paths (used by the training/eval scripts)
+export TARGET_PATH=/path/to/Alpamayo-R1-10B            # target VLM (10B)
+export VLM_PATH=/path/to/Qwen3-VL-8B-Instruct          # for building drafts
+export PROCESSOR_PATH=/path/to/Qwen3-VL-2B-Instruct    # tokenizer / processor
+```
+
+The trainers use `torch.distributed` via `torchrun`. K=32 + multi-block AARL fits
+8× 94GB H100 NVL with `--k_chunk_size 4`. SFT runs comfortably on the same
+hardware with `batch_size=2 --grad_accum_steps=2`.
+
+### Data preparation
+
+The pipeline needs three artifacts before training: (a) raw Alpamayo driving
+clips (.pt files per UUID), (b) the val/test UUID split, and (c) cached target
+outputs (greedy CoC tokens) per clip.
+
+#### 1. Get the raw clips
+
+The original Alpamayo clips ship with the upstream `nvidia/PhysicalAI-Autonomous-Vehicles`
+dataset (gated — request access first, then `hf auth login`).
+
+```bash
+# Cache a subset of clips locally (example: download 22k clips by UUID)
+python scripts/python/training/cache_alpamayo_clips.py \
+    --output_dir /path/to/alpamayo_clips \
+    --num_clips 22000 \
+    --hf_dataset nvidia/PhysicalAI-Autonomous-Vehicles
+```
+
+We also provide `cache_physical_ai_val_split.py` (for the off-shelf val split)
+and `cache_alpamayo_clips_from_uuids.py` (when you already have a UUID list).
+
+#### 2. Define val/test splits
+
+Splits are JSON arrays of clip UUIDs. Example (`splits_v3/`):
+
+```bash
+# val_uuids_v3.json   — 300 UUIDs
+# test_uuids_v3.json  — 200 UUIDs
+# (train = everything else, set automatically by excluding val/test)
+```
+
+The repo doesn't ship splits; pick UUIDs from your local clip pool.
+
+#### 3. Generate target CoC outputs
+
+Each training clip needs the target model's greedy CoC tokens cached. This is
+the one-time expensive step (~hours on 8 GPUs for 22k clips).
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python scripts/python/training/generate_target_outputs.py \
+    --target_path $TARGET_PATH \
+    --clips_dir /path/to/alpamayo_clips \
+    --output_dir /path/to/target_coc_outputs_all \
+    --max_clips 22000 \
+    --no_logits  # set false to also cache full token distributions for KL distillation
+```
+
+Output files are named `<uuid>.pt` and contain `prompt_input_ids`,
+`output_token_ids`, `pixel_values`, `image_grid_thw`, and optionally
+`output_logits`.
+
+### Training pipeline
+
+The full pipeline is **SFT → AARL** on top of the SFT init.
+
+#### Stage 1 — SFT (block-diffusion CE, ~30 epochs)
+
+```bash
+torchrun --nproc_per_node=8 scripts/python/training/train_dflash_distillation_v7.py \
+    --target_path $TARGET_PATH \
+    --target_outputs_dir /path/to/target_coc_outputs_all \
+    --val_uuids_file  splits/val_uuids_v3.json \
+    --test_uuids_file splits/test_uuids_v3.json \
+    --output_dir runs/dflash_L2_22k_sft_v7 \
+    --num_draft_layers 2 --block_size 16 \
+    --num_target_features 5 --target_layer_ids 1,9,17,25,33 \
+    --num_epochs 30 --lr 1e-4 \
+    --batch_size 2 --grad_accum_steps 2 \
+    --overlapping_blocks --random_mask
+```
+
+For EAGLE-3 SFT use `train_eagle3.py` with `--rollout_length 7 --target_layer_ids 1,17,32`.
+3D rotary variants add `--use_mrope3d_draft`. Concrete examples:
+`scripts/bash/katana_train_dflash_20k_L2L4.sh`, `katana_train_dflash_20k_3d_L2L4.sh`,
+`katana_train_eagle3_22k_1d_3d.sh`.
+
+#### Stage 2 — AARL post-training (multi-block contamination, 1 epoch)
+
+```bash
+torchrun --nproc_per_node=8 scripts/python/training/train_dflash_rl_action_v5.py \
+    --target_path $TARGET_PATH \
+    --init_draft_path runs/dflash_L2_22k_sft_v7/draft_final.pt \
+    --target_outputs_dir /path/to/target_coc_outputs_all \
+    --val_uuids_file  splits/val_uuids_v3.json \
+    --test_uuids_file splits/test_uuids_v3.json \
+    --output_dir runs/dflash_L2_22k_aarl_v5 \
+    --num_target_features 5 \
+    --num_epochs 1 --lr 1e-6 --kl_weight 0.02 \
+    --k_samples 32 --k_chunk_size 4 --temperature 1.0 \
+    --w_traj 1.0 --w_cons 0.0 --w_text 0.5 \
+    --multiblock_N 5 --multiblock_max_total 20 \
+    --anchor_source ref --filter_to_rejection_blocks
+```
+
+For EAGLE-3 use `train_eagle3_rl_action_v2.py` with `--block_size 8` (γ=7) and the
+same multi-block / K=32 settings (best lr=1e-5 for EAGLE-3 vs 1e-6 for DFlash —
+the optimal lr is architecture-dependent).
+
+Key arguments worth remembering:
+- `--multiblock_N` — window size of consecutive positions to contaminate per rejection block. 0 = legacy single-block; ≥1 enables multi-block iteration.
+- `--multiblock_max_total` — cumulative contaminated-position budget per step.
+- `--filter_to_rejection_blocks` — per-step probe of all `block_start` values; skips clips with zero rejections.
+- `--anchor_source ref` — anchor KL against the FROZEN ref draft (not the live policy). Required for stability.
+- `--k_samples 32 --k_chunk_size 4` — K=32 GRPO rollouts, chunked through the target VLM 4 at a time.
+
+#### AARL early stopping
+
+AARL ckpts tend to peak mid-training and decline. Save every 500 steps and
+evaluate intermediate ckpts (`draft_step_500.pt`, `draft_step_1000.pt`, ...) on
+val/test — final is often not best.
+
+### Evaluation
+
+End-to-end speculative-decode benchmark — measures L (avg accepted tokens / iter),
+c (draft cost / verify cost), and wall-clock speedup against AR baseline:
+
+```bash
+# DFlash draft
+CUDA_VISIBLE_DEVICES=0 python scripts/python/evaluation/benchmark_spec_decoding.py \
+    --target_path $TARGET_PATH \
+    --draft_path runs/dflash_L2_22k_aarl_v5/draft_final.pt \
+    --clips_dir /path/to/target_coc_outputs_all \
+    --uuids_file splits/val_uuids_v3.json \
+    --num_draft_layers 2 --block_size 16 --num_target_features 5 \
+    --output_json eval/dflash_val.json
+
+# EAGLE-3 draft  — use the matching e2e script (1D vs 3D)
+# scripts/python/evaluation/bench_eagle3_timings.py
+```
+
+Other useful eval utilities:
+
+- `scripts/python/evaluation/test_draft_accuracy.py` — per-block argmax-match accuracy (no end-to-end timing).
+- `scripts/python/evaluation/bench_dflash_c_ratio.py` — measures `c = draft_cost / verify_cost`.
+- `scripts/python/evaluation/eval_draft_output_region.py` — accuracy specifically on the output region (skips the long prompt prefix).
+
+### Reproducing the headline result
+
+Best-of-sweep recipe, in one line each:
+
+| Architecture | Init | Recipe | Test L (val L) | Δ vs SFT init |
+|---|---|---|---|---|
+| EAGLE-3 1D + AARL | 22k SFT 1D | `train_eagle3_rl_action_v2.py --multiblock_N 5 --multiblock_max_total 10 --lr 1e-5 --kl_weight 0.02 --k_samples 32` | **5.34** (5.51) | +0.067 |
+| DFlash L=2 1D + AARL | 22k SFT 1D | `train_dflash_rl_action_v5.py --multiblock_N 5 --multiblock_max_total 20 --lr 1e-6 --kl_weight 0.02 --k_samples 32` | 4.75 (5.00) | +0.014 |
+
+The `archive/all-versions` branch on github contains every intermediate trainer
+version (v2-v4 DFlash AARL, v2-v6 DFlash SFT, v1 EAGLE-3 AARL, etc.) for
+reference if you want to trace the development history.
 
 ## Frequently Asked Questions (FAQ)
 
