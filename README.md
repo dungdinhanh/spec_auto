@@ -1,8 +1,6 @@
 <div align="center">
 
-# 🏔️ Alpamayo 1
-
-### Bridging Reasoning and Action Prediction for Generalizable Autonomous Driving
+# Reasoning Aware Speculative Decoding for VLAs in Autonomous Driving
 
 </div>
 
@@ -318,43 +316,6 @@ The `archive/all-versions` branch on github contains every intermediate trainer
 version (v2-v4 DFlash AARL, v2-v6 DFlash SFT, v1 EAGLE-3 AARL, etc.) for
 reference if you want to trace the development history.
 
-## Frequently Asked Questions (FAQ)
-
-<details>
-<summary><strong>Does the 10B model accept navigation/route inputs?</strong></summary>
-
-While we have experimented with route conditioning capabilities, the released model does **not** include this feature. The current release takes multi-camera video and egomotion history as inputs, without explicit navigation or route inputs (e.g., waypoints, turn-by-turn navigation instructions).
-
-</details>
-
-<details>
-<summary><strong>Does the model produce meta-actions or support general VQA?</strong></summary>
-
-While we have experimented with meta-action and general VQA capabilities, the released model does **not** include these features. Alpamayo 1 is designed specifically for trajectory prediction with Chain-of-Causation reasoning, producing trajectory + reasoning trace outputs.
-
-</details>
-
-<details>
-<summary><strong>Was the 10B model post-trained with Reinforcement Learning (RL)?</strong></summary>
-
-No. The current 10B model release has **not** undergone RL post-training. While the paper describes RL stages for improving reasoning quality and action consistency, this release focuses on the supervised learning components. As mentioned above, we may release RL post-trained models in future releases.
-
-</details>
-
-<details>
-<summary><strong>What are the minimum GPU requirements?</strong></summary>
-
-You need an NVIDIA GPU with at least **24 GB VRAM** for inference. Tested configurations include RTX 3090, A100, and H100. Running on GPUs with less memory (e.g., 16 GB) will likely result in CUDA out-of-memory errors.
-
-</details>
-
-<details>
-<summary><strong>Can I use this model in production / commercial applications?</strong></summary>
-
-No. The model weights are released under a **non-commercial license**. This release is intended for research, experimentation, and evaluation purposes only. See the [License](#license) section and the [HuggingFace Model Card](https://huggingface.co/nvidia/Alpamayo-R1-10B) for details.
-
-</details>
-
 ## Project Structure
 
 ```
@@ -428,15 +389,3 @@ Important notes:
 
 By using this model, you acknowledge that it is a research tool intended to support scientific inquiry, benchmarking, and exploration—not a substitute for a certified AV stack. The developers and contributors disclaim any responsibility or liability for the use of the model or its outputs.
 
-## Citation
-
-If you use Alpamayo 1 in your research, please cite:
-
-```bibtex
-@article{nvidia2025alpamayo,
-      title={{Alpamayo-R1}: Bridging Reasoning and Action Prediction for Generalizable Autonomous Driving in the Long Tail},
-      author={NVIDIA and Yan Wang and Wenjie Luo and Junjie Bai and Yulong Cao and Tong Che and Ke Chen and Yuxiao Chen and Jenna Diamond and Yifan Ding and Wenhao Ding and Liang Feng and Greg Heinrich and Jack Huang and Peter Karkus and Boyi Li and Pinyi Li and Tsung-Yi Lin and Dongran Liu and Ming-Yu Liu and Langechuan Liu and Zhijian Liu and Jason Lu and Yunxiang Mao and Pavlo Molchanov and Lindsey Pavao and Zhenghao Peng and Mike Ranzinger and Ed Schmerling and Shida Shen and Yunfei Shi and Sarah Tariq and Ran Tian and Tilman Wekel and Xinshuo Weng and Tianjun Xiao and Eric Yang and Xiaodong Yang and Yurong You and Xiaohui Zeng and Wenyuan Zhang and Boris Ivanovic and Marco Pavone},
-      year={2025},
-      journal={arXiv preprint arXiv:2511.00088},
-}
-```
